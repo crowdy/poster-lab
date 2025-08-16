@@ -19,65 +19,8 @@ if ($PSVersionTable.PSEdition -ne "Core") {
     exit 1
 }
 
-# ===== Aspose.PSD 로더 =====
-function Load-AsposePSD {
-    $packageDir = "$PSScriptRoot/aspose-packages"
-    if (-not (Test-Path $packageDir)) { New-Item -ItemType Directory -Path $packageDir -Force | Out-Null }
-
-    $asposeDrawingDll = "$packageDir/Aspose.Drawing.dll"
-    $asposePsdDll     = "$packageDir/Aspose.PSD.dll"
-
-    if (-not (Test-Path $asposePsdDll)) {
-        Write-Host "Downloading Aspose.PSD packages for .NET 8.0..."
-        $tempDir = "$PSScriptRoot/temp-packages"
-        if (Test-Path $tempDir) { Remove-Item -Recurse -Force $tempDir }
-        try {
-            Set-Location $PSScriptRoot
-            dotnet new console -n TempProject -o $tempDir --force | Out-Null
-            Set-Location $tempDir
-            dotnet add package Aspose.PSD --version 24.12.0 | Out-Null
-            dotnet add package Aspose.Drawing --version 24.12.0 | Out-Null
-            dotnet restore | Out-Null
-
-            $packagesPath = "$env:USERPROFILE\.nuget\packages"
-            (Get-ChildItem "$packagesPath/aspose.psd/*/lib/net8.0/*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName | ForEach-Object { Copy-Item $_ "$packageDir/Aspose.PSD.dll" -Force }
-            (Get-ChildItem "$packagesPath/aspose.drawing/*/lib/net8.0/*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName | ForEach-Object { Copy-Item $_ "$packageDir/Aspose.Drawing.dll" -Force }
-
-            foreach ($dep in @(
-                "newtonsoft.json/*/lib/net6.0/*.dll",
-                "system.drawing.common/*/lib/net8.0/*.dll",
-                "system.text.encoding.codepages/*/lib/net8.0/*.dll"
-            )) {
-                $p = Get-ChildItem "$packagesPath/$dep" -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($p) { Copy-Item $p.FullName $packageDir -Force }
-            }
-        } catch {
-            Write-Error "Failed to download packages: $_"
-            Set-Location $PSScriptRoot
-            return $false
-        } finally {
-            Set-Location $PSScriptRoot
-            if (Test-Path $tempDir) { Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue }
-        }
-    }
-
-    try {
-        # CodePages 인코딩 등록 (텍스트/효과 렌더링 안정화)
-        Add-Type -AssemblyName "System.Text.Encoding.CodePages" -ErrorAction SilentlyContinue
-        [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
-
-        foreach ($dep in @("System.Text.Encoding.CodePages.dll","Newtonsoft.Json.dll","System.Drawing.Common.dll")) {
-            $p = Join-Path $packageDir $dep
-            if (Test-Path $p) { Add-Type -Path $p -ErrorAction SilentlyContinue }
-        }
-        Add-Type -Path $asposeDrawingDll
-        Add-Type -Path $asposePsdDll
-        return $true
-    } catch {
-        Write-Error "Error loading Aspose.PSD: $_"
-        return $false
-    }
-}
+# ===== Aspose.PSD 로더 (공통 함수 사용) =====
+. "$PSScriptRoot\Load-AsposePSD.ps1"
 
 # ===== Helper Functions =====
 function Get-FileSize {

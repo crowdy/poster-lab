@@ -13,8 +13,8 @@ param(
     [string]$LayerName,                # 특정 레이어명만 추출(옵션)
 
     [Parameter(Mandatory = $false)]
-    [ValidateRange(1,5)]
-    [int]$ExtractionMethod = 2,        # 추출 방법: 0=자동폴백(기본), 1=기본저장, 2=타입최적화, 3=강화픽셀, 4=기본픽셀, 5=합성크롭
+    [ValidateRange(0,6)]
+    [int]$ExtractionMethod = 6,        # 추출 방법: 0=자동폴백(기본), 1=기본저장, 2=타입최적화, 3=강화픽셀, 4=기본픽셀, 5=합성크롭, 6=픽셀직접처리
 
     [switch]$Silent,                   # true면 콘솔에 JSON 경로만 출력
     [switch]$ResultJsonOnly,           # true면 이미지 저장 없이 JSON만 생성
@@ -28,65 +28,8 @@ if ($PSVersionTable.PSEdition -ne "Core") {
     exit 1
 }
 
-# ===== Aspose.PSD 로더 =====
-function Load-AsposePSD {
-    $packageDir = "$PSScriptRoot/aspose-packages"
-    if (-not (Test-Path $packageDir)) { New-Item -ItemType Directory -Path $packageDir -Force | Out-Null }
-
-    $asposeDrawingDll = "$packageDir/Aspose.Drawing.dll"
-    $asposePsdDll     = "$packageDir/Aspose.PSD.dll"
-
-    if (-not (Test-Path $asposePsdDll)) {
-        Write-Host "Downloading Aspose.PSD packages for .NET 8.0..."
-        $tempDir = "$PSScriptRoot/temp-packages"
-        if (Test-Path $tempDir) { Remove-Item -Recurse -Force $tempDir }
-        try {
-            Set-Location $PSScriptRoot
-            dotnet new console -n TempProject -o $tempDir --force | Out-Null
-            Set-Location $tempDir
-            dotnet add package Aspose.PSD --version 24.12.0 | Out-Null
-            dotnet add package Aspose.Drawing --version 24.12.0 | Out-Null
-            dotnet restore | Out-Null
-
-            $packagesPath = "$env:USERPROFILE\.nuget\packages"
-            (Get-ChildItem "$packagesPath/aspose.psd/*/lib/net8.0/*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName | ForEach-Object { Copy-Item $_ "$packageDir/Aspose.PSD.dll" -Force }
-            (Get-ChildItem "$packagesPath/aspose.drawing/*/lib/net8.0/*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName | ForEach-Object { Copy-Item $_ "$packageDir/Aspose.Drawing.dll" -Force }
-
-            foreach ($dep in @(
-                "newtonsoft.json/*/lib/net6.0/*.dll",
-                "system.drawing.common/*/lib/net8.0/*.dll",
-                "system.text.encoding.codepages/*/lib/net8.0/*.dll"
-            )) {
-                $p = Get-ChildItem "$packagesPath/$dep" -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($p) { Copy-Item $p.FullName $packageDir -Force }
-            }
-        } catch {
-            Write-Error "Failed to download packages: $_"
-            Set-Location $PSScriptRoot
-            return $false
-        } finally {
-            Set-Location $PSScriptRoot
-            if (Test-Path $tempDir) { Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue }
-        }
-    }
-
-    try {
-        # CodePages 인코딩 등록 (텍스트/효과 렌더링 안정화)
-        Add-Type -AssemblyName "System.Text.Encoding.CodePages" -ErrorAction SilentlyContinue
-        [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
-
-        foreach ($dep in @("System.Text.Encoding.CodePages.dll","Newtonsoft.Json.dll","System.Drawing.Common.dll")) {
-            $p = Join-Path $packageDir $dep
-            if (Test-Path $p) { Add-Type -Path $p -ErrorAction SilentlyContinue }
-        }
-        Add-Type -Path $asposeDrawingDll
-        Add-Type -Path $asposePsdDll
-        return $true
-    } catch {
-        Write-Error "Error loading Aspose.PSD: $_"
-        return $false
-    }
-}
+# ===== Aspose.PSD 로더 (공통 함수 사용) =====
+. "$PSScriptRoot\Load-AsposePSD.ps1"
 
 # ===== 유틸 =====
 function Should-IgnoreLayer { param($Layer)
@@ -145,9 +88,189 @@ function Get-CleanErrorMessage { param($ErrorRecord, [switch]$DebugMode)
     return $msg
 }
 
-# === 다중 폴백 시스템 ===
+# === 추출 방법들 ===
 
-# 폴백 1: 레이어 픽셀 데이터 추출 후 저장
+# Method 6: 픽셀 데이터 직접 처리 (새로운 기본 방법)
+function Save-LayerByPixelDirectProcessing {
+    param(
+        [Aspose.PSD.FileFormats.Psd.PsdImage]$Psd,
+        $Layer,
+        [string]$OutFile,
+        $Options,
+        [ValidateSet('png','jpg')] [string]$Format,
+        [switch]$DebugMode
+    )
+    
+    try {
+        if ($DebugMode) { 
+            Write-Host "    === Method 6: 픽셀 데이터 직접 처리 ===" 
+            Write-Host "    레이어: '$($Layer.Name)'"
+            Write-Host "    바운드: $($Layer.Bounds.Width)x$($Layer.Bounds.Height)"
+        }
+        
+        $bounds = $Layer.Bounds
+        if ($bounds.Width -le 0 -or $bounds.Height -le 0) {
+            if ($DebugMode) { Write-Host "    실패: 유효하지 않은 바운드" }
+            return $false
+        }
+        
+        # 출력 디렉토리 확인
+        $outDir = [System.IO.Path]::GetDirectoryName($OutFile)
+        if (-not (Test-Path $outDir)) {
+            New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+        }
+        
+        # 1단계: 원본 픽셀 데이터 로드
+        if ($DebugMode) { Write-Host "    1단계: 픽셀 데이터 로드 중..." }
+        $pixels = $Layer.LoadArgb32Pixels($bounds)
+        
+        if (-not $pixels -or $pixels.Length -eq 0) {
+            if ($DebugMode) { Write-Host "    실패: 픽셀 데이터 없음" }
+            return $false
+        }
+        
+        if ($DebugMode) { Write-Host "    로드됨: $($pixels.Length)개 픽셀" }
+        
+        # 2단계: 픽셀 데이터 분석
+        if ($DebugMode) { Write-Host "    2단계: 픽셀 데이터 분석 중..." }
+        
+        $sampleSize = [Math]::Min(1000, $pixels.Length)
+        $hasNonBlackPixels = $false
+        $blackPixelCount = 0
+        $hasVisibleContent = $false
+        
+        for ($i = 0; $i -lt $sampleSize; $i++) {
+            $pixel = $pixels[$i]
+            $a = ($pixel -shr 24) -band 0xFF
+            $r = ($pixel -shr 16) -band 0xFF
+            $g = ($pixel -shr 8) -band 0xFF
+            $b = $pixel -band 0xFF
+            
+            # 알파가 0이 아니면 보이는 콘텐츠가 있음
+            if ($a -gt 0) {
+                $hasVisibleContent = $true
+            }
+            
+            if ($r -ne 0 -or $g -ne 0 -or $b -ne 0) {
+                $hasNonBlackPixels = $true
+                break
+            } else {
+                $blackPixelCount++
+            }
+        }
+        
+        $blackRatio = $blackPixelCount / $sampleSize * 100
+        if ($DebugMode) { 
+            Write-Host "    분석 결과: 검은색 픽셀 비율 $($blackRatio.ToString('F1'))%, 보이는 콘텐츠: $hasVisibleContent" 
+        }
+        
+        # 3단계: 레이어가 순수 검은색이고 보이는 콘텐츠가 없는 경우 합성 방법 시도
+        if (-not $hasNonBlackPixels -and -not $hasVisibleContent) {
+            if ($DebugMode) { Write-Host "    3단계: 비어있는 레이어 감지 - 합성 방법 시도" }
+            
+            # 합성 방법: 전체 이미지에서 해당 레이어만 보이게 한 후 추출
+            $originalVisibility = @()
+            for ($i = 0; $i -lt $Psd.Layers.Length; $i++) {
+                $originalVisibility += $Psd.Layers[$i].IsVisible
+                $Psd.Layers[$i].IsVisible = $false
+            }
+            $Layer.IsVisible = $true
+            
+            try {
+                # 임시 합성 이미지 생성
+                $tempFile = [System.IO.Path]::ChangeExtension($OutFile, ".temp.png")
+                $tempPngOptions = New-Object Aspose.PSD.ImageOptions.PngOptions
+                $tempPngOptions.ColorType = [Aspose.PSD.FileFormats.Png.PngColorType]::TruecolorWithAlpha
+                $Psd.Save($tempFile, $tempPngOptions)
+                
+                if (Test-Path $tempFile) {
+                    # System.Drawing으로 크롭
+                    Add-Type -AssemblyName System.Drawing
+                    $fullImg = [System.Drawing.Image]::FromFile($tempFile)
+                    
+                    try {
+                        # 크롭 영역 계산 (캔버스 범위 내로 제한)
+                        $cropX = [Math]::Max(0, $bounds.Left)
+                        $cropY = [Math]::Max(0, $bounds.Top)
+                        $cropW = [Math]::Min($bounds.Width, $fullImg.Width - $cropX)
+                        $cropH = [Math]::Min($bounds.Height, $fullImg.Height - $cropY)
+                        
+                        if ($cropW -gt 0 -and $cropH -gt 0) {
+                            $cropRect = New-Object System.Drawing.Rectangle($cropX, $cropY, $cropW, $cropH)
+                            $croppedImg = New-Object System.Drawing.Bitmap($cropW, $cropH)
+                            $graphics = [System.Drawing.Graphics]::FromImage($croppedImg)
+                            $graphics.DrawImage($fullImg, 0, 0, $cropRect, [System.Drawing.GraphicsUnit]::Pixel)
+                            $graphics.Dispose()
+                            
+                            $croppedImg.Save($OutFile, [System.Drawing.Imaging.ImageFormat]::Png)
+                            $croppedImg.Dispose()
+                            
+                            if (Test-Path $OutFile) {
+                                if ($DebugMode) { Write-Host "    성공: 합성+크롭 방법" }
+                                return $true
+                            }
+                        }
+                    } finally {
+                        $fullImg.Dispose()
+                        Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            } finally {
+                # 가시성 복구
+                for ($i = 0; $i -lt $Psd.Layers.Length; $i++) {
+                    $Psd.Layers[$i].IsVisible = $originalVisibility[$i]
+                }
+            }
+        }
+        
+        # 4단계: 직접 픽셀 데이터로 이미지 생성
+        if ($DebugMode) { Write-Host "    4단계: System.Drawing으로 이미지 생성" }
+        
+        Add-Type -AssemblyName System.Drawing
+        $bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        
+        try {
+            $bmpData = $bitmap.LockBits(
+                (New-Object System.Drawing.Rectangle(0, 0, $bounds.Width, $bounds.Height)),
+                [System.Drawing.Imaging.ImageLockMode]::WriteOnly,
+                [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+            )
+            
+            try {
+                # 픽셀 데이터를 비트맵에 복사
+                [System.Runtime.InteropServices.Marshal]::Copy($pixels, 0, $bmpData.Scan0, $pixels.Length)
+            } finally {
+                $bitmap.UnlockBits($bmpData)
+            }
+            
+            # 포맷에 따라 저장
+            if ($Format -eq 'png') {
+                $bitmap.Save($OutFile, [System.Drawing.Imaging.ImageFormat]::Png)
+            } else {
+                $bitmap.Save($OutFile, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+            }
+            
+            if (Test-Path $OutFile) {
+                if ($DebugMode) { 
+                    $fileSize = (Get-Item $OutFile).Length
+                    Write-Host "    성공: 직접 픽셀 처리 ($fileSize bytes)" 
+                }
+                return $true
+            }
+        } finally {
+            $bitmap.Dispose()
+        }
+        
+        if ($DebugMode) { Write-Host "    실패: 모든 방법 실패" }
+        return $false
+        
+    } catch {
+        if ($DebugMode) { Write-Host "    예외 발생: $($_.Exception.Message)" }
+        return $false
+    }
+}
+
+# 폴백 1: 레이어 픽셀 데이터 추출 후 저장 (기존 Method 4)
 function Save-LayerByPixelData {
     param(
         [Aspose.PSD.FileFormats.Psd.PsdImage]$Psd,
@@ -192,7 +315,7 @@ function Save-LayerByPixelData {
     }
 }
 
-# 폴백 2: 합성 저장 + System.Drawing 크롭 (개선된 버전)
+# 폴백 2: 합성 저장 + System.Drawing 크롭 (Method 5)
 function Save-LayerByCompositeAndCrop {
     param(
         [Aspose.PSD.FileFormats.Psd.PsdImage]$Psd,
@@ -275,7 +398,7 @@ function Save-LayerByCompositeAndCrop {
     }
 }
 
-# 폴백 3: 레이어 타입별 최적화 처리
+# 폴백 3: 레이어 타입별 최적화 처리 (Method 2)
 function Save-LayerByTypeOptimized {
     param(
         [Aspose.PSD.FileFormats.Psd.PsdImage]$Psd,
@@ -306,51 +429,17 @@ function Save-LayerByTypeOptimized {
         # 레이어 타입별 최적화 처리
         $layerType = $Layer.GetType().Name
         
-        # 1. ToBitmap 메서드 시도 (간단한 직접 저장)
+        # 1. 기본 Layer.Save 시도 (마지막 수단)
         try {
-            if ($Layer.GetType().GetMethod("ToBitmap")) {
-                $bitmap = $Layer.ToBitmap()
-                if ($bitmap) {
-                    # 직접 저장 시도 (System.Drawing.Bitmap으로 캐스팅)
-                    # $sysBitmap = [System.Drawing.Bitmap]$bitmap
-                    $bitmap.Save($OutFile)
-                    $bitmap.Dispose()
-                    if ($DebugMode) { Write-Host "    Success with direct ToBitmap method" }
-                    return $true
-                }
+            if ($DebugMode) { Write-Host "    Trying basic Layer.Save..." }
+            $Layer.Save($OutFile, $Options)
+            
+            if (Test-Path $OutFile) {
+                if ($DebugMode) { Write-Host "    Success with basic Layer.Save method" }
+                return $true
             }
         } catch {
-            if ($DebugMode) { Write-Host "    ToBitmap method failed: $($_.Exception.Message)" }
-        }
-        
-        # 2. 텍스트 레이어 특별 처리
-        if ($layerType -like "*Text*") {
-            try {
-                if ($DebugMode) { Write-Host "    Applying text layer optimization..." }
-                # 텍스트 레이어는 래스터화 후 처리
-                if ($Layer.GetType().GetMethod("DrawToBitmap")) {
-                    $bitmap = $Layer.DrawToBitmap($bounds.Width, $bounds.Height)
-                    $bitmap.Save($OutFile, $Options)
-                    $bitmap.Dispose()
-                    if ($DebugMode) { Write-Host "    Success with text layer optimization" }
-                    return $true
-                }
-            } catch {
-                if ($DebugMode) { Write-Host "    Text layer optimization failed: $($_.Exception.Message)" }
-            }
-        }
-        
-        # 3. 스마트 오브젝트 특별 처리
-        if ($layerType -like "*Smart*") {
-            try {
-                if ($DebugMode) { Write-Host "    Applying smart object optimization..." }
-                # 스마트 오브젝트는 내용을 먼저 로드
-                if ($Layer.GetType().GetMethod("LoadContents")) {
-                    $Layer.LoadContents()
-                }
-            } catch {
-                if ($DebugMode) { Write-Host "    Smart object optimization failed: $($_.Exception.Message)" }
-            }
+            if ($DebugMode) { Write-Host "    Basic Layer.Save failed: $($_.Exception.Message)" }
         }
         
         return $false
@@ -360,7 +449,7 @@ function Save-LayerByTypeOptimized {
     }
 }
 
-# 폴백 4: 강화된 픽셀 데이터 추출
+# 폴백 4: 강화된 픽셀 데이터 추출 (Method 3)
 function Save-LayerByEnhancedPixelData {
     param(
         [Aspose.PSD.FileFormats.Psd.PsdImage]$Psd,
@@ -449,9 +538,9 @@ function Save-LayerWithMultipleFallbacks {
         Write-Host "  Visible: $($Layer.IsVisible), Opacity: $($Layer.Opacity)"
         
         if ($Method -eq 0) {
-            Write-Host "  Using automatic fallback method (trying all methods)"
+            Write-Host "  Using automatic fallback method (trying all methods, starting with Method 6)"
         } else {
-            $methodNames = @("", "기본 Aspose 저장", "레이어 타입별 최적화", "강화된 픽셀 데이터 추출", "기본 픽셀 데이터 추출", "합성 + 크롭")
+            $methodNames = @("", "기본 Aspose 저장", "레이어 타입별 최적화", "강화된 픽셀 데이터 추출", "기본 픽셀 데이터 추출", "합성 + 크롭", "픽셀 직접 처리")
             Write-Host "  Using specified method $Method`: $($methodNames[$Method])"
         }
     }
@@ -484,10 +573,24 @@ function Save-LayerWithMultipleFallbacks {
             5 { # 방법 5: 합성 + 크롭
                 return Save-LayerByCompositeAndCrop -Psd $Psd -Layer $Layer -OutFile $OutFile -Options $Options -Format $Format -DebugMode:$DebugMode
             }
+            6 { # 방법 6: 픽셀 직접 처리 (새로운 기본 방법)
+                return Save-LayerByPixelDirectProcessing -Psd $Psd -Layer $Layer -OutFile $OutFile -Options $Options -Format $Format -DebugMode:$DebugMode
+            }
         }
     }
     
-    # Method = 0 (기본값): 자동 폴백 시스템 사용
+    # Method = 0 (기본값): 자동 폴백 시스템 사용 (Method 6부터 시작)
+    
+    # 방법 6: 픽셀 직접 처리 (새로운 우선순위 1)
+    if (Save-LayerByPixelDirectProcessing -Psd $Psd -Layer $Layer -OutFile $OutFile -Options $Options -Format $Format -DebugMode:$DebugMode) {
+        return $true
+    }
+    
+    # 방법 5: 합성 + 크롭
+    if (Save-LayerByCompositeAndCrop -Psd $Psd -Layer $Layer -OutFile $OutFile -Options $Options -Format $Format -DebugMode:$DebugMode) {
+        return $true
+    }
+    
     # 방법 1: 기본 Aspose 저장
     try {
         if ($DebugMode) { Write-Host "    Trying method 1: default Layer.Save... $OutFile" }
@@ -505,18 +608,13 @@ function Save-LayerWithMultipleFallbacks {
         return $true
     }
     
-    # 방법 3: 강화된 픽셀 데이터 추출
-    if (Save-LayerByEnhancedPixelData -Psd $Psd -Layer $Layer -OutFile $OutFile -Options $Options -Format $Format -DebugMode:$DebugMode) {
-        return $true
-    }
-    
     # 방법 4: 기본 픽셀 데이터 추출 (호환성을 위해 유지)
     if (Save-LayerByPixelData -Psd $Psd -Layer $Layer -OutFile $OutFile -Options $Options -Format $Format -DebugMode:$DebugMode) {
         return $true
     }
     
-    # 방법 5: 합성 + 크롭
-    if (Save-LayerByCompositeAndCrop -Psd $Psd -Layer $Layer -OutFile $OutFile -Options $Options -Format $Format -DebugMode:$DebugMode) {
+    # 방법 3: 강화된 픽셀 데이터 추출
+    if (Save-LayerByEnhancedPixelData -Psd $Psd -Layer $Layer -OutFile $OutFile -Options $Options -Format $Format -DebugMode:$DebugMode) {
         return $true
     }
     
@@ -533,9 +631,9 @@ Write-Host "Current directory: $(Get-Location)"
 
 # 추출 방법 표시
 if ($ExtractionMethod -eq 0) {
-    Write-Host "Extraction method: Automatic fallback (tries all methods)"
+    Write-Host "Extraction method: Automatic fallback (starts with Method 6 - Pixel Direct Processing)"
 } else {
-    $methodNames = @("", "기본 Aspose 저장", "레이어 타입별 최적화", "강화된 픽셀 데이터 추출", "기본 픽셀 데이터 추출", "합성 + 크롭")
+    $methodNames = @("", "기본 Aspose 저장", "레이어 타입별 최적화", "강화된 픽셀 데이터 추출", "기본 픽셀 데이터 추출", "합성 + 크롭", "픽셀 직접 처리")
     Write-Host "Extraction method: $ExtractionMethod ($($methodNames[$ExtractionMethod]))"
 }
 
