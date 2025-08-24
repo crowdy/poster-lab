@@ -112,7 +112,7 @@ foreach ($jsonFile in $jsonFiles) {
     $psdData = [ordered]@{
         main_character_count = 0; sub_character_count = 0
         "1_main_chara_face_xywh" = ""; "2_main_chara_face_xywh" = ""; "3_main_chara_face_xywh" = ""; "4_main_chara_face_xywh" = ""; "5_main_chara_face_xywh" = ""; "6_main_chara_face_xywh" = ""
-        "1_sub_face_xywh" = ""; "2_sub_face_xywh" = ""; "3_sub_face_xywh" = ""; "4_sub_face_xywh" = ""; "5_sub_face_xywh" = ""; "6_sub_face_xywh" = ""
+        "1_sub_chara_face_xywh" = ""; "2_sub_chara_face_xywh" = ""; "3_sub_chara_face_xywh" = ""; "4_sub_chara_face_xywh" = ""; "5_sub_chara_face_xywh" = ""; "6_sub_chara_face_xywh" = ""
     }
     1..6 | ForEach-Object {
         $psdData["${_}_machine_xywh"] = ""; $psdData["${_}_machine_icon1_xywh"] = ""; $psdData["${_}_machine_icon2_xywh"] = ""; $psdData["${_}_machine_name_xywh"] = ""; $psdData["${_}_machine_copyright_xywh"] = ""
@@ -131,12 +131,11 @@ foreach ($jsonFile in $jsonFiles) {
 
             $shouldSavePng = $false
             $machineIdForPath = $null
-            if ($machineCount -eq 1 -and $jsonContent) {
+            if ($machineCount -ge 1 -and $jsonContent) {
                 $machineInfo = $jsonContent.model_information[0]
                 if ($machineInfo -and $machineInfo.machineId) {
                     $machineIdForPath = $machineInfo.machineId
                     $shouldSavePng = $true
-                    $shouldSavePng = $false
                 } else {
                     Write-Warning "MachineCount가 1이지만 JSON 'model_information' 배열의 첫 아이템에서 'machineId'를 찾을 수 없어 PNG 추출을 건너<binary data, 2 bytes, 18 bytes>니다."
                 }
@@ -158,8 +157,8 @@ foreach ($jsonFile in $jsonFiles) {
                         
                         $abs_xywh = "$($faceLayer.Left), $($faceLayer.Top), $($faceLayer.Width), $($faceLayer.Height)"
                         if ($charaType -eq "main") { $psdData["${counter}_main_chara_face_xywh"] = $abs_xywh }
-                        else { $psdData["${counter}_sub_face_xywh"] = $abs_xywh }
-                        
+                        else { $psdData["${counter}_sub_chara_face_xywh"] = $abs_xywh }
+
                         $rel_x = $faceLayer.Left - $layer.Left; $rel_y = $faceLayer.Top - $layer.Top
                         
                         $pngOutputDir = Join-Path $ImageOutputDir "$machineIdForPath\characters\"
@@ -168,16 +167,16 @@ foreach ($jsonFile in $jsonFiles) {
                         $pngFullPath = Join-Path $pngOutputDir $pngFileName
                         
                         # ===> 수정된 부분: 올바른 네임스페이스로 PngColorType 지정
-                        $pngOptions = New-Object Aspose.PSD.ImageOptions.PngOptions
-                        $pngOptions.ColorType = [Aspose.PSD.FileFormats.Png.PngColorType]::TruecolorWithAlpha
+                        # $pngOptions = New-Object Aspose.PSD.ImageOptions.PngOptions
+                        # $pngOptions.ColorType = [Aspose.PSD.FileFormats.Png.PngColorType]::TruecolorWithAlpha
                         
-                        $saveSuccess = Save-LayerByPixelData -Layer $layer -OutFile $pngFullPath -Options $pngOptions
+                        # $saveSuccess = Save-LayerByPixelData -Layer $layer -OutFile $pngFullPath -Options $pngOptions
                         
-                        if ($saveSuccess) {
-                            Write-Host "  -> 이미지 추출: $pngFullPath" -ForegroundColor DarkGray
-                        } else {
-                            Write-Warning "  -> 이미지 추출 실패: $pngFullPath"
-                        }
+                        # if ($saveSuccess) {
+                        #     Write-Host "  -> 이미지 추출: $pngFullPath" -ForegroundColor DarkGray
+                        # } else {
+                        #     Write-Warning "  -> 이미지 추출 실패: $pngFullPath"
+                        # }
                     }
                 } 
                 elseif ($layerName -match "^chara_main_") {
@@ -186,8 +185,9 @@ foreach ($jsonFile in $jsonFiles) {
                 elseif ($layerName -match "^chara_sub_") {
                     $subCharaCounter++
                 }
-
-                if ($layerName -match "^machine_main_g(\d{2})") { $num = [int]$matches[1]; if ($num -le 6) { $psdData["${num}_machine_xywh"] = "$($layer.Left), $($layer.Top), $($layer.Width), $($layer.Height)" } }
+                if ($layerName -match "^machine_main_g(\d{2})") { 
+                    $num = [int]$matches[1]; if ($num -le 6) { $psdData["${num}_machine_xywh"] = "$($layer.Left), $($layer.Top), $($layer.Width), $($layer.Height)" } 
+                }
                 if ($layerName -match "^machine-icon_g(\d{2}) #1") { $num = [int]$matches[1]; if ($num -le 6) { $psdData["${num}_machine_icon1_xywh"] = "$($layer.Left), $($layer.Top), $($layer.Width), $($layer.Height)" } }
                 if ($layerName -match "^machine-icon_g(\d{2}) #2") { $num = [int]$matches[1]; if ($num -le 6) { $psdData["${num}_machine_icon2_xywh"] = "$($layer.Left), $($layer.Top), $($layer.Width), $($layer.Height)" } }
                 if ($layerName -match "^machine-name_g(\d{2}) #1") { $num = [int]$matches[1]; if ($num -le 6) { $psdData["${num}_machine_name_xywh"] = "$($layer.Left), $($layer.Top), $($layer.Width), $($layer.Height)" } }
@@ -196,6 +196,10 @@ foreach ($jsonFile in $jsonFiles) {
                 if ($layerName -eq "text-catch-1") { $psdData["text-catch-1_xywh"] = "$($layer.Left), $($layer.Top), $($layer.Width), $($layer.Height)" }
                 if ($layerName -match "^scheduled_") { $psdData["scheduled_xywh"] = "$($layer.Left), $($layer.Top), $($layer.Width), $($layer.Height)" }
             }
+            if (-Not $psdData["${num}_machine_xywh"]) {
+                Write-Warning "Machine main layer not found: $layerName"
+            }
+
             $psdData.main_character_count = $mainCharaCounter
             $psdData.sub_character_count = $subCharaCounter
         }
@@ -221,7 +225,7 @@ foreach ($jsonFile in $jsonFiles) {
 # --- 3. CSV 파일로 저장 ---
 if ($finalResults) {
     try {
-        $columnOrder = "FileName","MachineCount","Orientation","main_character_count","sub_character_count","logo_type","1_main_chara_face_xywh","2_main_chara_face_xywh","3_main_chara_face_xywh","4_main_chara_face_xywh","5_main_chara_face_xywh","6_main_chara_face_xywh","1_sub_face_xywh","2_sub_face_xywh","3_sub_face_xywh","4_sub_face_xywh","5_sub_face_xywh","6_sub_face_xywh","1_machine_xywh","1_machine_icon1_xywh","1_machine_icon2_xywh","1_machine_name_xywh","1_machine_copyright_xywh","2_machine_xywh","2_machine_icon1_xywh","2_machine_icon2_xywh","2_machine_name_xywh","2_machine_copyright_xywh","3_machine_xywh","3_machine_icon1_xywh","3_machine_icon2_xywh","3_machine_name_xywh","3_machine_copyright_xywh","4_machine_xywh","4_machine_icon1_xywh","4_machine_icon2_xywh","4_machine_name_xywh","4_machine_copyright_xywh","5_machine_xywh","5_machine_icon1_xywh","5_machine_icon2_xywh","5_machine_name_xywh","5_machine_copyright_xywh","6_machine_xywh","6_machine_icon1_xywh","6_machine_icon2_xywh","6_machine_name_xywh","6_machine_copyright_xywh","text-catch-1_xywh","scheduled_xywh"
+        $columnOrder = "FileName","MachineCount","Orientation","main_character_count","sub_character_count","logo_type","1_main_chara_face_xywh","2_main_chara_face_xywh","3_main_chara_face_xywh","4_main_chara_face_xywh","5_main_chara_face_xywh","6_main_chara_face_xywh","1_sub_chara_face_xywh","2_sub_chara_face_xywh","3_sub_chara_face_xywh","4_sub_chara_face_xywh","5_sub_chara_face_xywh","6_sub_chara_face_xywh","1_machine_xywh","1_machine_icon1_xywh","1_machine_icon2_xywh","1_machine_name_xywh","1_machine_copyright_xywh","2_machine_xywh","2_machine_icon1_xywh","2_machine_icon2_xywh","2_machine_name_xywh","2_machine_copyright_xywh","3_machine_xywh","3_machine_icon1_xywh","3_machine_icon2_xywh","3_machine_name_xywh","3_machine_copyright_xywh","4_machine_xywh","4_machine_icon1_xywh","4_machine_icon2_xywh","4_machine_name_xywh","4_machine_copyright_xywh","5_machine_xywh","5_machine_icon1_xywh","5_machine_icon2_xywh","5_machine_name_xywh","5_machine_copyright_xywh","6_machine_xywh","6_machine_icon1_xywh","6_machine_icon2_xywh","6_machine_name_xywh","6_machine_copyright_xywh","text-catch-1_xywh","scheduled_xywh"
         $finalResults | Select-Object $columnOrder | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
         
         $totalTime = (Get-Date) - $startTime

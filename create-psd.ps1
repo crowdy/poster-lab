@@ -67,10 +67,10 @@ try {
     . "$PSScriptRoot\create-psd-config.ps1"
     
     # Aspose.PSD 라이브러리 로드
-    . ".\Load-AsposePSD.ps1"
-    if (-not (Load-AsposePSD)) {
-        throw "Failed to load Aspose.PSD library"
-    }
+    # . ".\Load-AsposePSD.ps1"
+    # if (-not (Load-AsposePSD)) {
+    #     throw "Failed to load Aspose.PSD library"
+    # }
     
     # 핵심 함수들 로드
     . "$PSScriptRoot\PSD-Functions.ps1"
@@ -163,25 +163,12 @@ try {
     Initialize-LogFile -workingPath $script:WorkingPath
     
     # ============================================================================
-    # [4/5] 머신데이터 복사
+    # [3.5] CSV 데이터 로드 (머신 데이터 복사 전 준비)
     # ============================================================================
-    Write-Progress -Activity "Creating PSD" -Status "Copying machine data..." -PercentComplete 70
-    Write-Host ""
-    Write-Host "[$($Config_StepDescriptions[4])] Starting..." -ForegroundColor Yellow
-    Write-PSDLog "INFO" "[4/$($Config_TotalSteps)] $($Config_StepDescriptions[4]) started"
-    
-    Copy-Machine-Data -workingPath $script:WorkingPath -machineIds $machineIds
-    
-    Write-Host "[$($Config_StepDescriptions[4])] Completed ✓" -ForegroundColor Green
-    Write-PSDLog "INFO" "[4/$($Config_TotalSteps)] $($Config_StepDescriptions[4]) completed successfully"
-    
-    # ============================================================================
-    # [4.5] CSV 데이터 로드 (PSD 처리 전 준비)
-    # ============================================================================
-    Write-Progress -Activity "Creating PSD" -Status "Loading poster CSV data..." -PercentComplete 85
+    Write-Progress -Activity "Creating PSD" -Status "Loading poster CSV data..." -PercentComplete 60
     Write-Host ""
     Write-Host "[CSV 데이터 로드] Starting..." -ForegroundColor Yellow
-    Write-PSDLog "INFO" "Loading poster CSV data for direct layer replacement"
+    Write-PSDLog "INFO" "Loading poster CSV data for machine data copying"
     
     # poster.csv 데이터 로드
     $posterData = Load-PosterCSVData -csvPath "d:\poster.csv"
@@ -206,6 +193,19 @@ try {
             if ($posterData.ContainsKey($psdUuid)) {
                 $posterRecord = $posterData[$psdUuid]
                 Write-PSDLog "INFO" "Found poster record for UUID: $psdUuid"
+                # write all poster record (handle both hashtable and PSCustomObject)
+                if ($posterRecord) {
+                    if ($posterRecord -is [hashtable]) {
+                        foreach ($key in $posterRecord.Keys) {
+                            Write-PSDLog "DEBUG" "Poster record [$key]: $($posterRecord[$key])"
+                        }
+                    } else {
+                        # PSCustomObject case (from Import-Csv)
+                        foreach ($property in $posterRecord.PSObject.Properties) {
+                            Write-PSDLog "DEBUG" "Poster record [$($property.Name)]: $($property.Value)"
+                        }
+                    }
+                }
             } else {
                 Write-PSDLog "WARN" "No poster record found for UUID: $psdUuid"
             }
@@ -219,9 +219,22 @@ try {
     Write-Host "[CSV 데이터 로드] Completed ✓" -ForegroundColor Green
     
     # ============================================================================
+    # [4/5] 머신데이터 복사
+    # ============================================================================
+    Write-Progress -Activity "Creating PSD" -Status "Copying machine data..." -PercentComplete 70
+    Write-Host ""
+    Write-Host "[$($Config_StepDescriptions[4])] Starting..." -ForegroundColor Yellow
+    Write-PSDLog "INFO" "[4/$($Config_TotalSteps)] $($Config_StepDescriptions[4]) started"
+    
+    Copy-Machine-Data -workingPath $script:WorkingPath -machineIds $machineIds -posterRecord $posterRecord
+    
+    Write-Host "[$($Config_StepDescriptions[4])] Completed ✓" -ForegroundColor Green
+    Write-PSDLog "INFO" "[4/$($Config_TotalSteps)] $($Config_StepDescriptions[4]) completed successfully"
+    
+    # ============================================================================
     # [5/5] PSD 처리
     # ============================================================================
-    Write-Progress -Activity "Creating PSD" -Status "Processing PSD..." -PercentComplete 90
+    Write-Progress -Activity "Creating PSD" -Status "Processing PSD..." -PercentComplete 85
     Write-Host ""
     Write-Host "[$($Config_StepDescriptions[5])] Starting..." -ForegroundColor Yellow
     Write-PSDLog "INFO" "[5/$($Config_TotalSteps)] $($Config_StepDescriptions[5]) started"
