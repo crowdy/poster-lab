@@ -130,7 +130,15 @@ $license.SetLicense("Aspose.PSD.NET_(2).lic.txt");
     }
 
     $license = New-Object Aspose.PSD.License
-    $license.SetLicense("Aspose.PSD.NET_(2).lic.txt");
+    # $license.SetLicense("Aspose.PSD.NET_(2).lic.txt");
+    $license.SetLicense("Aspose.PSD.NET_(3).lic"); # e:\logical-experiment\local-proj-1\aspose-packages\Aspose.PSD.NET_(3).lic  
+}
+
+# Automatically load Aspose.PSD when this script is dot-sourced
+if (Load-AsposePSD) {
+    Write-Host "Aspose.PSD loaded successfully from Load-AsposePSD.ps1" -ForegroundColor Green
+} else {
+    Write-Error "Failed to load Aspose.PSD from Load-AsposePSD.ps1"
 }
 
 # Export the function for module use (optional)

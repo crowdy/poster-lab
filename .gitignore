@@ -1,3 +1,8 @@
 aspose-packages
 *.json
 nuget.exe
+test
+*.py
+*.psd
+*.png
+*.zip
