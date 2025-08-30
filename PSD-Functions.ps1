@@ -325,6 +325,44 @@ function Copy-Machine-Data {
     
     Write-PSDLog "INFO" "Processing $($machineIdArray.Count) machine(s): $($machineIdArray -join ', ')"
     
+    # ===== 1. Sequential mapping 초기화 =====
+    Write-PSDLog "INFO" "Initializing sequential mapping for character positioning"
+    Initialize-MachineSequentialMapping -machineIds $machineIdArray
+    
+    # ===== 2. 사용 가능한 face position 확인 =====
+    $availableFacePositions = Get-AvailableFacePositions -posterRecord $posterRecord
+    Write-PSDLog "INFO" "Face position limits - Main: $($availableFacePositions.MainCharacterPositions), Sub: $($availableFacePositions.SubCharacterPositions), Total: $($availableFacePositions.TotalPositions)"
+    
+    # ===== 3. Character 파일 생성 계획 수립 =====
+    $totalMachines = $machineIdArray.Count
+    $mainCharactersToCreate = [Math]::Min($totalMachines, $availableFacePositions.MainCharacterPositions)
+    $remainingPositions = $availableFacePositions.TotalPositions - $mainCharactersToCreate
+    
+    # CSV에서 sub_character_count 가져오기 (전체 합계)
+    $requestedSubCharacterCount = 0
+    if ($posterRecord) {
+        try {
+            if ($posterRecord -is [hashtable]) {
+                $requestedSubCharacterCount = [int]$posterRecord["sub_character_count"]
+            } else {
+                $requestedSubCharacterCount = [int]$posterRecord.sub_character_count
+            }
+            Write-PSDLog "DEBUG" "Requested sub character count from CSV: $requestedSubCharacterCount"
+        } catch {
+            Write-PSDLog "WARN" "Failed to get sub_character_count from posterRecord: $($_.Exception.Message)"
+            $requestedSubCharacterCount = 0
+        }
+    }
+    
+    # 실제로 생성할 sub character 개수 (제한 적용)
+    $subCharactersToCreate = [Math]::Min($requestedSubCharacterCount, $remainingPositions)
+    
+    Write-PSDLog "INFO" "Character creation plan - Main: $mainCharactersToCreate/$totalMachines, Sub: $subCharactersToCreate/$requestedSubCharacterCount (Available positions: $($availableFacePositions.TotalPositions))"
+    
+    if ($subCharactersToCreate -lt $requestedSubCharacterCount) {
+        Write-PSDLog "WARN" "Sub character count reduced from $requestedSubCharacterCount to $subCharactersToCreate due to face position limits"
+    }
+    
     for ($i = 0; $i -lt $machineIdArray.Count; $i++) {
         $machineId = $machineIdArray[$i]
         $gNumber = $Config_MachineGroupFormat -f ($i + 1)  # g01, g02, ...
@@ -339,46 +377,45 @@ function Copy-Machine-Data {
             $charImages = Get-ChildItem $charactersPath -Filter "*.png" -File
             
             if ($charImages.Count -gt 0) {
-                # CSV에서 sub_character_count 가져오기
-                $subCharacterCount = 0
-                if ($posterRecord) {
-                    try {
-                        if ($posterRecord -is [hashtable]) {
-                            $subCharacterCount = [int]$posterRecord["sub_character_count"]
-                        } else {
-                            $subCharacterCount = [int]$posterRecord.sub_character_count
-                        }
-                        Write-PSDLog "DEBUG" "Sub character count from CSV: $subCharacterCount"
-                    } catch {
-                        Write-PSDLog "WARN" "Failed to get sub_character_count from posterRecord: $($_.Exception.Message)"
-                        $subCharacterCount = 0
+                # ===== Main Character 생성 (제한된 개수만) =====
+                if ($i -lt $mainCharactersToCreate) {
+                    $selectedChar = Get-UniqueRandomFile $charImages $usedFiles "characters_main_$machineId"
+                    
+                    # 원본 파일명에서 얼굴 좌표 정보 추출
+                    $faceCoords = Extract-FaceCoordinatesFromFilename $selectedChar.Name
+                    if ($faceCoords) {
+                        # 얼굴 좌표 정보를 포함한 파일명으로 복사
+                        $destFileName = "chara_main_${gNumber}_1-$($faceCoords.FaceX)-$($faceCoords.FaceY)-$($faceCoords.FaceWidth)-$($faceCoords.FaceHeight).png"
+                        Write-PSDLog "DEBUG" "Preserving face coordinates in filename: $destFileName"
+                    } else {
+                        # 얼굴 좌표 정보가 없으면 기본 패턴 사용
+                        $destFileName = $Config_FileNamePatterns.CharacterMain -f $gNumber
+                        Write-PSDLog "DEBUG" "No face coordinates found, using default pattern: $destFileName"
                     }
-                }
-                
-                # ===== Main Character 생성 =====
-                $selectedChar = Get-UniqueRandomFile $charImages $usedFiles "characters_main_$machineId"
-                
-                # 원본 파일명에서 얼굴 좌표 정보 추출
-                $faceCoords = Extract-FaceCoordinatesFromFilename $selectedChar.Name
-                if ($faceCoords) {
-                    # 얼굴 좌표 정보를 포함한 파일명으로 복사
-                    $destFileName = "chara_main_${gNumber}_1-$($faceCoords.FaceX)-$($faceCoords.FaceY)-$($faceCoords.FaceWidth)-$($faceCoords.FaceHeight).png"
-                    Write-PSDLog "DEBUG" "Preserving face coordinates in filename: $destFileName"
+                    
+                    $destPath = Join-Path $workingPath $destFileName
+                    Copy-Item $selectedChar.FullName -Destination $destPath -Force
+                    Write-PSDLog "INFO" "Main Character created: $($selectedChar.Name) -> $destFileName"
                 } else {
-                    # 얼굴 좌표 정보가 없으면 기본 패턴 사용
-                    $destFileName = $Config_FileNamePatterns.CharacterMain -f $gNumber
-                    Write-PSDLog "DEBUG" "No face coordinates found, using default pattern: $destFileName"
+                    Write-PSDLog "INFO" "Skipping main character creation for machine $machineId due to face position limits (created: $mainCharactersToCreate/$totalMachines)"
                 }
                 
-                $destPath = Join-Path $workingPath $destFileName
-                Copy-Item $selectedChar.FullName -Destination $destPath -Force
-                Write-PSDLog "DEBUG" "Main Character: $($selectedChar.Name) -> $destFileName"
+                # ===== Sub Characters 생성 (전체 제한 적용) =====
+                # 각 머신별로 균등하게 sub character를 분배
+                $subCharPerMachine = if ($totalMachines -gt 0) { [Math]::Floor($subCharactersToCreate / $totalMachines) } else { 0 }
+                $remainingSubChars = $subCharactersToCreate - ($subCharPerMachine * $totalMachines)
+                
+                # 현재 머신의 sub character 개수 계산
+                $currentMachineSubCount = $subCharPerMachine
+                if ($i -lt $remainingSubChars) {
+                    $currentMachineSubCount++  # 나머지를 앞쪽 머신들에 분배
+                }
                 
                 # ===== Sub Characters 생성 =====
-                if ($subCharacterCount -gt 0) {
-                    Write-PSDLog "INFO" "Creating $subCharacterCount sub character(s) for machine $machineId ($gNumber)"
+                if ($currentMachineSubCount -gt 0) {
+                    Write-PSDLog "INFO" "Creating $currentMachineSubCount sub character(s) for machine $machineId ($gNumber)"
                     
-                    for ($subIndex = 1; $subIndex -le $subCharacterCount; $subIndex++) {
+                    for ($subIndex = 1; $subIndex -le $currentMachineSubCount; $subIndex++) {
                         # 가능하면 다른 이미지 선택, 부족하면 중복 허용
                         $selectedSubChar = Get-UniqueRandomFile $charImages $usedFiles "characters_sub_${machineId}_$subIndex"
                         
@@ -399,7 +436,7 @@ function Copy-Machine-Data {
                         Write-PSDLog "DEBUG" "Sub Character $subIndex : $($selectedSubChar.Name) -> $subDestFileName"
                     }
                 } else {
-                    Write-PSDLog "DEBUG" "No sub characters needed for machine $machineId (sub_character_count: $subCharacterCount)"
+                    Write-PSDLog "DEBUG" "No sub characters needed for machine $machineId (limited by face positions)"
                 }
             } else {
                 Write-PSDLog "WARN" "No character images found for machine $machineId"
@@ -739,6 +776,141 @@ function Bake-PSD {
 # NEW HELPER FUNCTIONS FOR DIRECT LAYER REPLACEMENT
 # ================================================================================
 
+# Global variable to store machine ID to sequential number mapping
+$Global:MachineSequentialMapping = @{}
+
+function Initialize-MachineSequentialMapping {
+    <#
+    .SYNOPSIS
+        머신 ID 배열을 기반으로 G번호 → 순번 매핑 테이블을 생성합니다.
+    
+    .PARAMETER machineIds
+        머신 ID 배열
+    
+    .OUTPUTS
+        [void] Global 변수에 매핑 테이블 저장
+    #>
+    
+    param(
+        [int[]]$machineIds
+    )
+    
+    Write-PSDLog "DEBUG" "Initializing machine sequential mapping"
+    $Global:MachineSequentialMapping = @{}
+    
+    for ($i = 0; $i -lt $machineIds.Count; $i++) {
+        $gNumber = $Config_MachineGroupFormat -f ($i + 1)  # g01, g02, g03, g04
+        $sequentialNumber = $i + 1  # 1, 2, 3, 4
+        
+        $Global:MachineSequentialMapping[$gNumber] = $sequentialNumber
+        Write-PSDLog "DEBUG" "Mapped: $gNumber → Sequential #$sequentialNumber (Machine ID: $($machineIds[$i]))"
+    }
+    
+    Write-PSDLog "INFO" "Machine sequential mapping initialized with $($machineIds.Count) entries"
+}
+
+function Get-MachineSequentialNumber {
+    <#
+    .SYNOPSIS
+        G번호를 순번으로 변환합니다.
+    
+    .PARAMETER gNumber
+        G번호 (예: "01", "02", "03", "04")
+    
+    .OUTPUTS
+        [int] 순번 (1, 2, 3, 4)
+    #>
+    
+    param(
+        [string]$gNumber
+    )
+    
+    $gKey = "g$gNumber"
+    if ($Global:MachineSequentialMapping.ContainsKey($gKey)) {
+        return $Global:MachineSequentialMapping[$gKey]
+    }
+    
+    Write-PSDLog "WARN" "No sequential mapping found for G number: $gNumber, defaulting to 1"
+    return 1
+}
+
+function Get-AvailableFacePositions {
+    <#
+    .SYNOPSIS
+        poster.csv에서 실제 존재하는 face position 개수를 확인합니다.
+    
+    .PARAMETER posterRecord
+        포스터 CSV 레코드
+    
+    .OUTPUTS
+        [hashtable] 사용 가능한 face position 정보
+    #>
+    
+    param(
+        $posterRecord
+    )
+    
+    Write-PSDLog "DEBUG" "Checking available face positions in poster CSV"
+    
+    if (-not $posterRecord) {
+        Write-PSDLog "WARN" "No poster record provided"
+        return @{
+            MainCharacterPositions = 0
+            SubCharacterPositions = 0
+            TotalPositions = 0
+        }
+    }
+    
+    $csvRow = $posterRecord
+    $mainPositions = 0
+    $subPositions = 0
+    
+    # Main character face positions 확인 (1_main_chara_face_xywh, 2_main_chara_face_xywh, ...)
+    for ($i = 1; $i -le 10; $i++) {  # 최대 10개까지 확인
+        $columnName = "${i}_main_chara_face_xywh"
+        $value = $null
+        
+        if ($csvRow -is [hashtable]) {
+            $value = $csvRow[$columnName]
+        } else {
+            $property = $csvRow.PSObject.Properties | Where-Object { $_.Name -eq $columnName } | Select-Object -First 1
+            $value = if ($property) { $property.Value } else { $null }
+        }
+        
+        if (-not [string]::IsNullOrEmpty($value) -and $value -ne "0" -and $value -ne "null") {
+            $mainPositions++
+            Write-PSDLog "DEBUG" "Found main character position $i : $value"
+        }
+    }
+    
+    # Sub character face positions 확인 (1_sub_chara_face_xywh, 2_sub_chara_face_xywh, ...)
+    for ($i = 1; $i -le 10; $i++) {  # 최대 10개까지 확인
+        $columnName = "${i}_sub_chara_face_xywh"
+        $value = $null
+        
+        if ($csvRow -is [hashtable]) {
+            $value = $csvRow[$columnName]
+        } else {
+            $property = $csvRow.PSObject.Properties | Where-Object { $_.Name -eq $columnName } | Select-Object -First 1
+            $value = if ($property) { $property.Value } else { $null }
+        }
+        
+        if (-not [string]::IsNullOrEmpty($value) -and $value -ne "0" -and $value -ne "null") {
+            $subPositions++
+            Write-PSDLog "DEBUG" "Found sub character position $i : $value"
+        }
+    }
+    
+    $result = @{
+        MainCharacterPositions = $mainPositions
+        SubCharacterPositions = $subPositions
+        TotalPositions = $mainPositions + $subPositions
+    }
+    
+    Write-PSDLog "INFO" "Available face positions - Main: $mainPositions, Sub: $subPositions, Total: $($result.TotalPositions)"
+    return $result
+}
+
 function Extract-FaceCoordinatesFromFilename {
     <#
     .SYNOPSIS
@@ -1022,14 +1194,29 @@ function Process-CharacterLayer {
             }
             
             # 대응하는 레이어 찾기 (예: chara_main_g01_1.png -> chara_main_g01 #1)
-            $gNumber = if ($charFile.Name -match 'g(\d+)') { $matches[1] } else { "01" }
+            # 더 정확한 G번호 추출 (전체 파일명 패턴 매칭)
+            $gNumber = $null
+            if ($charFile.Name -match '^chara_main_g(\d+)_\d+') {
+                $gNumber = $matches[1]
+                Write-PSDLog "DEBUG" "Extracted G number '$gNumber' from filename: $($charFile.Name)"
+            } else {
+                Write-PSDLog "WARN" "Could not extract G number from filename: $($charFile.Name), using fallback"
+                $gNumber = "01"  # 기본값
+            }
+            
+            Write-PSDLog "DEBUG" "Processing character file: $($charFile.Name) -> G number: $gNumber"
+            
             $layerName = "chara_main_g$gNumber #1"
+            Write-PSDLog "DEBUG" "Looking for target layer: $layerName"
             
             $targetLayer = $psdImage.Layers | Where-Object { $_.DisplayName -eq $layerName } | Select-Object -First 1
             if (-not $targetLayer) {
                 Write-PSDLog "WARN" "Target layer not found: $layerName"
+                Write-PSDLog "DEBUG" "Available layer names: $($psdImage.Layers | ForEach-Object { $_.DisplayName } | Sort-Object)"
                 continue
             }
+            
+            Write-PSDLog "DEBUG" "Found target layer: $layerName"
             
             # CSV에서 얼굴 목표 위치 가져오기
             if (-not $posterRecord) {
@@ -1039,27 +1226,49 @@ function Process-CharacterLayer {
             
             $csvRow = $posterRecord
             
-            Write-PSDLog "DEBUG" "Face target position (CSV): $($csvRow."1_main_chara_face_xywh")"
-            $faceTargetRect = Parse-XYWHString $csvRow."1_main_chara_face_xywh"
+            # Sequential mapping 사용하여 CSV 컬럼명 생성
+            $sequentialNumber = Get-MachineSequentialNumber $gNumber
+            $csvColumnName = "${sequentialNumber}_main_chara_face_xywh"
+            Write-PSDLog "DEBUG" "Looking for CSV column: $csvColumnName (G number: $gNumber -> Sequential number: $sequentialNumber)"
+            
+            $faceTargetRect = $null
+            if ($csvRow -is [hashtable]) {
+                $faceTargetString = $csvRow[$csvColumnName]
+            } else {
+                # PSCustomObject case
+                $property = $csvRow.PSObject.Properties | Where-Object { $_.Name -eq $csvColumnName } | Select-Object -First 1
+                $faceTargetString = if ($property) { $property.Value } else { $null }
+            }
+            
+            Write-PSDLog "DEBUG" "Face target position (CSV): $csvColumnName = $faceTargetString"
+            $faceTargetRect = Parse-XYWHString $faceTargetString
             if (-not $faceTargetRect) {
-                Write-PSDLog "WARN" "No face target position found in CSV for UUID: $psdUuid"
+                Write-PSDLog "WARN" "No face target position found in CSV for UUID: $psdUuid, Column: $csvColumnName"
+                Write-PSDLog "DEBUG" "Available CSV columns: $(if ($csvRow -is [hashtable]) { $csvRow.Keys -join ', ' } else { ($csvRow.PSObject.Properties | ForEach-Object { $_.Name }) -join ', ' })"
                 continue
             }
             
+            Write-PSDLog "DEBUG" "Face target rectangle: X=$($faceTargetRect.X), Y=$($faceTargetRect.Y), W=$($faceTargetRect.Width), H=$($faceTargetRect.Height)"
+            
             # 스케일 및 위치 계산
             $sourceRect = New-Object Aspose.PSD.Rectangle($faceCoords.FaceX, $faceCoords.FaceY, $faceCoords.FaceWidth, $faceCoords.FaceHeight)
+            Write-PSDLog "DEBUG" "Source face rectangle: X=$($sourceRect.X), Y=$($sourceRect.Y), W=$($sourceRect.Width), H=$($sourceRect.Height)"
             
             # 이미지 크기 가져오기 (Dispose 처리 포함)
             $tempImage = [System.Drawing.Image]::FromFile($charFile.FullName)
             $imageSize = New-Object System.Drawing.Size($tempImage.Width, $tempImage.Height)
             $tempImage.Dispose()
             
+            Write-PSDLog "DEBUG" "Image size: W=$($imageSize.Width), H=$($imageSize.Height)"
+            
             $calculation = Calculate-ScaleAndPosition $sourceRect $faceTargetRect $imageSize
+            
+            Write-PSDLog "DEBUG" "Scale calculation: Scale=$([math]::Round($calculation.ScaleRatio, 3)), NewSize=$($calculation.NewWidth)x$($calculation.NewHeight), FinalPos=$($calculation.FinalLeft),$($calculation.FinalTop)"
             
             # 레이어 내용 교체
             Replace-LayerWithDirectContent $psdImage $targetLayer $charFile.FullName $calculation
             
-            Write-PSDLog "INFO" "Character layer processed successfully: $layerName"
+            Write-PSDLog "INFO" "Character layer processed successfully: $layerName (G$gNumber -> Face $([int]$gNumber))"
             
         } catch {
             Write-PSDLog "ERROR" "Failed to process character file $($charFile.Name): $($_.Exception.Message)"
@@ -1205,8 +1414,22 @@ function Process-MachineLayer {
             }
             
             $csvRow = $posterRecord
-            Write-PSDLog "DEBUG" "Machine target position (CSV) : $($csvRow."$([int]$gNumber)`_machine_xywh")"
-            $machineTargetRect = Parse-XYWHString $csvRow."$([int]$gNumber)`_machine_xywh"
+            
+            # Sequential mapping 사용하여 CSV 컬럼명 생성
+            $sequentialNumber = Get-MachineSequentialNumber $gNumber
+            $csvColumnName = "${sequentialNumber}_machine_xywh"
+            Write-PSDLog "DEBUG" "Looking for CSV column: $csvColumnName (G number: $gNumber -> Sequential number: $sequentialNumber)"
+            
+            $machineTargetString = $null
+            if ($csvRow -is [hashtable]) {
+                $machineTargetString = $csvRow[$csvColumnName]
+            } else {
+                $property = $csvRow.PSObject.Properties | Where-Object { $_.Name -eq $csvColumnName } | Select-Object -First 1
+                $machineTargetString = if ($property) { $property.Value } else { $null }
+            }
+            
+            Write-PSDLog "DEBUG" "Machine target position (CSV): $csvColumnName = $machineTargetString"
+            $machineTargetRect = Parse-XYWHString $machineTargetString
             if (-not $machineTargetRect) {
                 Write-PSDLog "WARN" "No machine target position found in CSV for machine $gNumber, continuing to next machine"
                 continue
@@ -1265,16 +1488,18 @@ function Process-IconLayer {
         try {
             Write-PSDLog "DEBUG" "Processing icon file: $($iconFile.Name)"
             
-            # 파일명에서 아이콘 번호와 G 번호 추출 (예: machine_icon1_g01_1.png)
-            if ($iconFile.Name -match 'machine-icon_g(\d+)_(\d+)\.png$') {
-                $iconNumber = $matches[1]
-                # must be 2 digits for gNumber
-                $gNumber = if ($iconFile.Name -match 'g(\d{2})') { $matches[1] } else { "01" }
-                $layerName = "machine-icon_g$gNumber #1"
+            # 파일명에서 G번호와 아이콘 파일 번호 추출 (예: machine-icon_g01_1.png, machine-icon_g01_2.png)
+            if ($iconFile.Name -match 'machine-icon_g(\d{2})_(\d+)\.png$') {
+                $gNumber = $matches[1]        # "01", "02", etc.
+                $iconFileNumber = $matches[2] # "1", "2", etc.
+                
+                # 레이어 이름 생성: 아이콘 파일 번호에 따라 다른 레이어 선택
+                $layerName = "machine-icon_g$gNumber #$iconFileNumber"
+                Write-PSDLog "DEBUG" "Looking for target layer: $layerName (G: $gNumber, Icon: $iconFileNumber)"
                 
                 $targetLayer = $psdImage.Layers | Where-Object { $_.DisplayName -eq $layerName } | Select-Object -First 1
                 if (-not $targetLayer) {
-                    Write-PSDLog "WARN" "Target icon layer not found: $layerName , continuing to next icon"
+                    Write-PSDLog "WARN" "Target icon layer not found: $layerName, continuing to next icon"
                     continue
                 }
                 
@@ -1285,11 +1510,24 @@ function Process-IconLayer {
                 }
                 
                 $csvRow = $posterRecord
-                Write-PSDLog "DEBUG" $csvRow
-                Write-PSDLog "DEBUG" "$([int]$gNumber)`_machine_icon$([int]$iconNumber)_xywh"
-                $iconTargetRect = Parse-XYWHString $csvRow."$([int]$gNumber)`_machine_icon$([int]$iconNumber)_xywh"
+                # Sequential mapping 사용하여 CSV 컬럼명 생성
+                $sequentialNumber = Get-MachineSequentialNumber $gNumber
+                # 아이콘 파일 번호를 그대로 사용 (1, 2, ...)
+                $csvColumnName = "${sequentialNumber}_machine_icon${iconFileNumber}_xywh"
+                Write-PSDLog "DEBUG" "Looking for CSV column: $csvColumnName (G number: $gNumber -> Sequential number: $sequentialNumber, Icon file: $iconFileNumber)"
+                
+                $iconTargetString = $null
+                if ($csvRow -is [hashtable]) {
+                    $iconTargetString = $csvRow[$csvColumnName]
+                } else {
+                    $property = $csvRow.PSObject.Properties | Where-Object { $_.Name -eq $csvColumnName } | Select-Object -First 1
+                    $iconTargetString = if ($property) { $property.Value } else { $null }
+                }
+                
+                Write-PSDLog "DEBUG" "Icon target position (CSV): $csvColumnName = $iconTargetString"
+                $iconTargetRect = Parse-XYWHString $iconTargetString
                 if (-not $iconTargetRect) {
-                    Write-PSDLog "WARN" "No icon target position found in CSV for icon $iconNumber, machine $gNumber"
+                    Write-PSDLog "WARN" "No icon target position found in CSV for icon $iconFileNumber, machine $gNumber"
                     continue
                 }
                 
@@ -1306,7 +1544,7 @@ function Process-IconLayer {
                 
                 Write-PSDLog "INFO" "Icon layer processed successfully: $layerName"
             } else {
-                Write-PSDLog "WARN" "Icon layer not found: $layerName"
+                Write-PSDLog "WARN" "Could not parse icon filename pattern: $($iconFile.Name)"
             }
             
         } catch {
