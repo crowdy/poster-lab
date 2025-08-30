@@ -18,7 +18,7 @@ if ($PSVersionTable.PSEdition -ne "Core") {
 }
 
 # ===== Aspose.PSD 로더 (공통 함수 사용) =====
-. "$PSScriptRoot\Load-AsposePSD.ps1"
+# . "$PSScriptRoot\Load-AsposePSD.ps1"
 
 # ===== 유틸리티 함수들 =====
 function Write-VerboseMessage {
@@ -114,16 +114,42 @@ function Extract-BackgroundLayer {
         # 레이어를 PNG로 저장 시도 (여러 방법 사용)
         $success = $false
         
-        # 방법 1: 직접 레이어 저장
+        # 방법 3: 픽셀 데이터 직접 처리 (먼저 시도)
         try {
-            Write-VerboseMessage "Attempting method 1: Direct layer save..."
-            $targetLayer.Save($outputPath, $pngOptions)
-            if (Test-Path $outputPath) {
-                $success = $true
-                Write-VerboseMessage "Method 1 succeeded"
+            Write-VerboseMessage "Attempting method 3: Direct pixel processing..."
+            
+            $bounds = $targetLayer.Bounds
+            $pixels = $targetLayer.LoadArgb32Pixels($bounds)
+            
+            if ($pixels -and $pixels.Length -gt 0) {
+                Add-Type -AssemblyName System.Drawing
+                $bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+                
+                try {
+                    $bmpData = $bitmap.LockBits(
+                        (New-Object System.Drawing.Rectangle(0, 0, $bounds.Width, $bounds.Height)),
+                        [System.Drawing.Imaging.ImageLockMode]::WriteOnly,
+                        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+                    )
+                    
+                    try {
+                        [System.Runtime.InteropServices.Marshal]::Copy($pixels, 0, $bmpData.Scan0, $pixels.Length)
+                    } finally {
+                        $bitmap.UnlockBits($bmpData)
+                    }
+                    
+                    $bitmap.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Png)
+                    
+                    if (Test-Path $outputPath) {
+                        $success = $true
+                        Write-VerboseMessage "Method 3 succeeded"
+                    }
+                } finally {
+                    $bitmap.Dispose()
+                }
             }
         } catch {
-            Write-VerboseMessage "Method 1 failed: $($_.Exception.Message)"
+            Write-VerboseMessage "Method 3 failed: $($_.Exception.Message)"
         }
         
         # 방법 2: 합성 저장 후 크롭
@@ -187,43 +213,17 @@ function Extract-BackgroundLayer {
             }
         }
         
-        # 방법 3: 픽셀 데이터 직접 처리
+        # 방법 1: 직접 레이어 저장 (마지막 시도)
         if (-not $success) {
             try {
-                Write-VerboseMessage "Attempting method 3: Direct pixel processing..."
-                
-                $bounds = $targetLayer.Bounds
-                $pixels = $targetLayer.LoadArgb32Pixels($bounds)
-                
-                if ($pixels -and $pixels.Length -gt 0) {
-                    Add-Type -AssemblyName System.Drawing
-                    $bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-                    
-                    try {
-                        $bmpData = $bitmap.LockBits(
-                            (New-Object System.Drawing.Rectangle(0, 0, $bounds.Width, $bounds.Height)),
-                            [System.Drawing.Imaging.ImageLockMode]::WriteOnly,
-                            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
-                        )
-                        
-                        try {
-                            [System.Runtime.InteropServices.Marshal]::Copy($pixels, 0, $bmpData.Scan0, $pixels.Length)
-                        } finally {
-                            $bitmap.UnlockBits($bmpData)
-                        }
-                        
-                        $bitmap.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Png)
-                        
-                        if (Test-Path $outputPath) {
-                            $success = $true
-                            Write-VerboseMessage "Method 3 succeeded"
-                        }
-                    } finally {
-                        $bitmap.Dispose()
-                    }
+                Write-VerboseMessage "Attempting method 1: Direct layer save..."
+                $targetLayer.Save($outputPath, $pngOptions)
+                if (Test-Path $outputPath) {
+                    $success = $true
+                    Write-VerboseMessage "Method 1 succeeded"
                 }
             } catch {
-                Write-VerboseMessage "Method 3 failed: $($_.Exception.Message)"
+                Write-VerboseMessage "Method 1 failed: $($_.Exception.Message)"
             }
         }
         
