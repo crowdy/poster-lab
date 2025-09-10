@@ -12,10 +12,31 @@ try {
     Write-Host "Warning: Could not load System.Drawing.Common: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
+# Find PSD files in the current directory
+$psdFiles = Get-ChildItem -Path $pwd -Filter "*.psd" -File
+if ($psdFiles.Count -eq 0) {
+    Write-Host "No PSD files found in the current directory" -ForegroundColor Red
+    exit 1
+}
+
+# Display found PSD files and let user select if multiple
+if ($psdFiles.Count -eq 1) {
+    $selectedPsd = $psdFiles[0]
+    Write-Host "Found PSD file: $($selectedPsd.Name)" -ForegroundColor Green
+} else {
+    Write-Host "Found multiple PSD files:" -ForegroundColor Yellow
+    for ($i = 0; $i -lt $psdFiles.Count; $i++) {
+        Write-Host "  [$($i+1)] $($psdFiles[$i].Name)" -ForegroundColor White
+    }
+    $selection = Read-Host "Select PSD file number (1-$($psdFiles.Count))"
+    $selectedPsd = $psdFiles[[int]$selection - 1]
+}
+
 # Input and output paths
-$inputPath = join-path ${pwd} "test\004074e3-7c95-470e-9777-ad8955de45d7.psd"
-$outputPath = join-path ${pwd} "test_text-alternative.psd"
-$previewPath = join-path ${pwd} "test_text-alternative_preview.png"
+$inputPath = $selectedPsd.FullName
+$baseName = [System.IO.Path]::GetFileNameWithoutExtension($selectedPsd.Name)
+$outputPath = join-path ${pwd} "${baseName}_text-alternative.psd"
+$previewPath = join-path ${pwd} "${baseName}_text-alternative_preview.png"
 
 Write-Host "Starting alternative text layer test..." -ForegroundColor Green
 
